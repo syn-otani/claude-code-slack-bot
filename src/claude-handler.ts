@@ -2,6 +2,12 @@ import { query, type SDKMessage } from '@anthropic-ai/claude-code';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager, McpServerConfig } from './mcp-manager';
+import { permissionHandler } from './permission-handler';
+import { bypassModeManager } from './bypass-mode-manager';
+import path from 'path';
+
+// Get the directory where this file is located
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
 export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
@@ -39,16 +45,32 @@ export class ClaudeHandler {
     workingDirectory?: string,
     slackContext?: { channel: string; threadTs?: string; user: string }
   ): AsyncGenerator<SDKMessage, void, unknown> {
+    // Check if bypass mode is enabled for this channel/thread
+    const isBypassMode = slackContext
+      ? bypassModeManager.isBypassMode(
+          slackContext.channel,
+          slackContext.threadTs,
+          slackContext.channel.startsWith('D') ? slackContext.user : undefined
+        )
+      : true; // No Slack context means bypass by default
+
     const options: any = {
       outputFormat: 'stream-json',
-      permissionMode: slackContext ? 'default' : 'bypassPermissions',
+      // Use 'bypassPermissions' if bypass mode is on, otherwise 'default' with approval
+      permissionMode: isBypassMode ? 'bypassPermissions' : 'default',
     };
 
-    // Add permission prompt tool if we have Slack context
-    if (slackContext) {
-      options.permissionPromptToolName = 'mcp__permission-prompt__permission_prompt';
-      this.logger.debug('Added permission prompt tool for Slack integration', slackContext);
+    // Add canUseTool callback for Slack-based permission approval (only if not in bypass mode)
+    if (slackContext && !isBypassMode) {
+      options.canUseTool = permissionHandler.createCanUseToolCallback(slackContext);
+      this.logger.debug('Added canUseTool callback for Slack permission approval', slackContext);
     }
+
+    this.logger.debug('Permission mode determined', {
+      isBypassMode,
+      permissionMode: options.permissionMode,
+      hasSlackContext: !!slackContext
+    });
 
     if (workingDirectory) {
       options.cwd = workingDirectory;
@@ -56,39 +78,18 @@ export class ClaudeHandler {
 
     // Add MCP server configuration if available
     const mcpServers = this.mcpManager.getServerConfiguration();
-    
-    // Add permission prompt server if we have Slack context
-    if (slackContext) {
-      const permissionServer = {
-        'permission-prompt': {
-          command: 'npx',
-          args: ['tsx', '/Users/marcelpociot/Experiments/claude-code-slack/src/permission-mcp-server.ts'],
-          env: {
-            SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
-            SLACK_CONTEXT: JSON.stringify(slackContext)
-          }
-        }
-      };
-      
-      if (mcpServers) {
-        options.mcpServers = { ...mcpServers, ...permissionServer };
-      } else {
-        options.mcpServers = permissionServer;
-      }
-    } else if (mcpServers && Object.keys(mcpServers).length > 0) {
+
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
       options.mcpServers = mcpServers;
     }
-    
+
     if (options.mcpServers && Object.keys(options.mcpServers).length > 0) {
-      // Allow all MCP tools by default, plus permission prompt tool
+      // Allow all MCP tools by default
       const defaultMcpTools = this.mcpManager.getDefaultAllowedTools();
-      if (slackContext) {
-        defaultMcpTools.push('mcp__permission-prompt');
-      }
       if (defaultMcpTools.length > 0) {
         options.allowedTools = defaultMcpTools;
       }
-      
+
       this.logger.debug('Added MCP configuration to options', {
         serverCount: Object.keys(options.mcpServers).length,
         servers: Object.keys(options.mcpServers),
@@ -106,10 +107,12 @@ export class ClaudeHandler {
 
     this.logger.debug('Claude query options', options);
 
+    // Add abort controller to options
+    options.abortController = abortController || new AbortController();
+
     try {
       for await (const message of query({
         prompt,
-        abortController: abortController || new AbortController(),
         options,
       })) {
         if (message.type === 'system' && message.subtype === 'init') {
@@ -130,7 +133,14 @@ export class ClaudeHandler {
     }
   }
 
-  cleanupInactiveSessions(maxAge: number = 30 * 60 * 1000) {
+  cleanupInactiveSessions(maxAgeHours: number = 24) {
+    // If maxAgeHours is 0 or negative, never clean up sessions
+    if (maxAgeHours <= 0) {
+      this.logger.debug('Session cleanup disabled (timeout set to 0)');
+      return;
+    }
+
+    const maxAge = maxAgeHours * 60 * 60 * 1000; // Convert hours to milliseconds
     const now = Date.now();
     let cleaned = 0;
     for (const [key, session] of this.sessions.entries()) {
@@ -140,7 +150,31 @@ export class ClaudeHandler {
       }
     }
     if (cleaned > 0) {
-      this.logger.info(`Cleaned up ${cleaned} inactive sessions`);
+      this.logger.info(`Cleaned up ${cleaned} inactive sessions (timeout: ${maxAgeHours}h)`);
     }
+  }
+
+  /**
+   * Get all sessions (for backup)
+   */
+  getAllSessions(): Map<string, ConversationSession> {
+    return this.sessions;
+  }
+
+  /**
+   * Restore sessions from backup
+   */
+  restoreSessions(sessions: Map<string, ConversationSession>): void {
+    for (const [key, session] of sessions.entries()) {
+      this.sessions.set(key, session);
+    }
+    this.logger.info(`Restored ${sessions.size} sessions from backup`);
+  }
+
+  /**
+   * Set a session directly (for restoration)
+   */
+  setSession(key: string, session: ConversationSession): void {
+    this.sessions.set(key, session);
   }
 }

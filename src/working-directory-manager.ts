@@ -189,10 +189,10 @@ export class WorkingDirectoryManager {
 
   formatChannelSetupMessage(channelId: string, channelName: string): string {
     const hasBaseDir = !!config.baseDirectory;
-    
+
     let message = `🏠 **Channel Working Directory Setup**\n\n`;
     message += `Please set the default working directory for #${channelName}:\n\n`;
-    
+
     if (hasBaseDir) {
       message += `**Options:**\n`;
       message += `• \`cwd project-name\` (relative to: \`${config.baseDirectory}\`)\n`;
@@ -202,10 +202,48 @@ export class WorkingDirectoryManager {
       message += `• \`cwd /path/to/project\`\n`;
       message += `• \`set directory /path/to/project\`\n\n`;
     }
-    
+
     message += `This becomes the default for all conversations in this channel.\n`;
     message += `Individual threads can override this by mentioning me with a different \`cwd\` command.`;
-    
+
     return message;
+  }
+
+  /**
+   * Get all working directory configurations (for backup)
+   */
+  getAllConfigs(): Map<string, string> {
+    const result = new Map<string, string>();
+    for (const [key, conf] of this.configs.entries()) {
+      result.set(key, conf.directory);
+    }
+    return result;
+  }
+
+  /**
+   * Restore working directories from backup
+   */
+  restoreConfigs(configs: Map<string, string>): void {
+    for (const [key, directory] of configs.entries()) {
+      // Parse key to extract channelId and threadTs
+      const parts = key.split('-');
+      const channelId = parts[0];
+      const threadTs = parts.length > 1 ? parts.slice(1).join('-') : undefined;
+
+      // Only restore if directory still exists
+      if (fs.existsSync(directory)) {
+        const workingDirConfig: WorkingDirectoryConfig = {
+          channelId,
+          threadTs,
+          directory,
+          setAt: new Date(),
+        };
+        this.configs.set(key, workingDirConfig);
+        this.logger.debug('Restored working directory', { key, directory });
+      } else {
+        this.logger.warn('Skipped restoring non-existent directory', { key, directory });
+      }
+    }
+    this.logger.info(`Restored ${this.configs.size} working directory configurations`);
   }
 }

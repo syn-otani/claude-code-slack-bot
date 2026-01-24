@@ -8,8 +8,13 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const logger = new Logger('PermissionMCP');
+
+// Directory for approval communication files
+const APPROVAL_DIR = path.join(process.env.HOME || '/tmp', '.claude-code-slack-bot', 'approvals');
 
 interface PermissionRequest {
   tool_name: string;
@@ -23,6 +28,13 @@ interface PermissionResponse {
   behavior: 'allow' | 'deny';
   updatedInput?: any;
   message?: string;
+}
+
+// Ensure approval directory exists
+function ensureApprovalDir() {
+  if (!fs.existsSync(APPROVAL_DIR)) {
+    fs.mkdirSync(APPROVAL_DIR, { recursive: true });
+  }
 }
 
 class PermissionMCPServer {
@@ -107,13 +119,14 @@ class PermissionMCPServer {
     // Generate unique approval ID
     const approvalId = `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // Create approval message with buttons
+    // Create approval message with buttons (with user mention)
+    const mentionText = user ? `<@${user}> ` : '';
     const blocks = [
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `🔐 *Permission Request*\n\nClaude wants to use the tool: \`${tool_name}\`\n\n*Tool Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``
+          text: `${mentionText}🔐 *Permission Request*\n\nClaude wants to use the tool: \`${tool_name}\`\n\n*Tool Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``
         }
       },
       {
@@ -153,12 +166,12 @@ class PermissionMCPServer {
     ];
 
     try {
-      // Send approval request to Slack
+      // Send approval request to Slack (with mention in fallback text for notification)
       const result = await this.slack.chat.postMessage({
         channel: channel || user || 'general',
         thread_ts: thread_ts,
         blocks,
-        text: `Permission request for ${tool_name}` // Fallback text
+        text: `${mentionText}Permission request for ${tool_name}` // Fallback text with mention
       });
 
       // Wait for user response
@@ -220,20 +233,66 @@ class PermissionMCPServer {
   }
 
   private async waitForApproval(approvalId: string): Promise<PermissionResponse> {
-    return new Promise((resolve, reject) => {
-      // Store the promise resolvers
-      this.pendingApprovals.set(approvalId, { resolve, reject });
-      
-      // Set timeout (5 minutes)
-      setTimeout(() => {
-        if (this.pendingApprovals.has(approvalId)) {
-          this.pendingApprovals.delete(approvalId);
+    ensureApprovalDir();
+    const approvalFile = path.join(APPROVAL_DIR, `${approvalId}.json`);
+
+    logger.info('Waiting for approval', {
+      approvalId,
+      approvalFile,
+      approvalDir: APPROVAL_DIR,
+      home: process.env.HOME
+    });
+
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      const timeout = 5 * 60 * 1000; // 5 minutes
+      const pollInterval = 500; // Check every 500ms
+      let pollCount = 0;
+
+      const checkApproval = () => {
+        pollCount++;
+
+        // Check if timed out
+        if (Date.now() - startTime > timeout) {
+          logger.info('Permission request timed out', { approvalId, pollCount });
+          // Clean up any leftover file
+          try { fs.unlinkSync(approvalFile); } catch {}
           resolve({
             behavior: 'deny',
             message: 'Permission request timed out'
           });
+          return;
         }
-      }, 5 * 60 * 1000);
+
+        // Check if approval file exists
+        if (fs.existsSync(approvalFile)) {
+          try {
+            const content = fs.readFileSync(approvalFile, 'utf-8');
+            logger.info('Found approval file', { approvalId, content });
+            const response = JSON.parse(content) as PermissionResponse;
+
+            // Clean up the file
+            fs.unlinkSync(approvalFile);
+
+            logger.info('Received approval response from file', { approvalId, response, pollCount });
+            resolve(response);
+            return;
+          } catch (error) {
+            logger.error('Error reading approval file', error);
+          }
+        }
+
+        // Log every 10 polls (5 seconds)
+        if (pollCount % 10 === 0) {
+          logger.debug('Still waiting for approval', { approvalId, pollCount, elapsed: Date.now() - startTime });
+        }
+
+        // Continue polling
+        setTimeout(checkApproval, pollInterval);
+      };
+
+      // Start polling
+      checkApproval();
     });
   }
 

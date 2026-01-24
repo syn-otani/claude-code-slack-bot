@@ -6,8 +6,13 @@ import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
-import { permissionServer } from './permission-mcp-server';
+import { bypassModeManager } from './bypass-mode-manager';
 import { config } from './config';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Directory for approval communication files (must match permission-mcp-server.ts)
+const APPROVAL_DIR = path.join(process.env.HOME || '/tmp', '.claude-code-slack-bot', 'approvals');
 
 interface MessageEvent {
   user: string;
@@ -47,6 +52,20 @@ export class SlackHandler {
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
+  }
+
+  /**
+   * Get all working directories (for backup)
+   */
+  getWorkingDirectories(): Map<string, string> {
+    return this.workingDirManager.getAllConfigs();
+  }
+
+  /**
+   * Restore working directories from backup
+   */
+  restoreWorkingDirectories(configs: Map<string, string>): void {
+    this.workingDirManager.restoreConfigs(configs);
   }
 
   async handleMessage(event: MessageEvent, say: any) {
@@ -145,6 +164,33 @@ export class SlackHandler {
         });
       }
       return;
+    }
+
+    // Check if this is a bypass mode command (only if there's text)
+    if (text) {
+      const bypassCommand = bypassModeManager.parseBypassCommand(text);
+      const isDMForBypass = channel.startsWith('D');
+      const context = thread_ts ? 'this thread' : (isDMForBypass ? 'this conversation' : 'this channel');
+
+      if (bypassCommand !== null) {
+        bypassModeManager.setBypassMode(channel, bypassCommand.enable, thread_ts, isDMForBypass ? user : undefined);
+        const statusEmoji = bypassCommand.enable ? '🔓' : '🔐';
+        const statusText = bypassCommand.enable ? 'Bypass mode enabled' : 'Approval mode enabled';
+        await say({
+          text: `${statusEmoji} *${statusText}* for ${context}\n\n${bypassCommand.enable ? 'Tools will be executed without requiring approval.' : 'You will be asked to approve tool executions.'}`,
+          thread_ts: thread_ts || ts,
+        });
+        return;
+      }
+
+      if (bypassModeManager.isStatusQuery(text)) {
+        const isEnabled = bypassModeManager.isBypassMode(channel, thread_ts, isDMForBypass ? user : undefined);
+        await say({
+          text: bypassModeManager.formatStatusMessage(isEnabled, context),
+          thread_ts: thread_ts || ts,
+        });
+        return;
+      }
     }
 
     // Check if we have a working directory set
@@ -643,6 +689,35 @@ export class SlackHandler {
     await this.updateMessageReaction(sessionKey, emoji);
   }
 
+  private writeApprovalResponse(approvalId: string, approved: boolean): void {
+    try {
+      // Ensure directory exists
+      if (!fs.existsSync(APPROVAL_DIR)) {
+        fs.mkdirSync(APPROVAL_DIR, { recursive: true });
+      }
+
+      const approvalFile = path.join(APPROVAL_DIR, `${approvalId}.json`);
+      const response = {
+        behavior: approved ? 'allow' : 'deny',
+        message: approved ? 'Approved by user' : 'Denied by user'
+      };
+
+      // Write to temp file first, then rename (atomic operation)
+      const tempFile = approvalFile + '.tmp';
+      fs.writeFileSync(tempFile, JSON.stringify(response));
+      fs.renameSync(tempFile, approvalFile);
+
+      this.logger.info('Wrote approval response to file', {
+        approvalId,
+        approved,
+        file: approvalFile,
+        exists: fs.existsSync(approvalFile)
+      });
+    } catch (error) {
+      this.logger.error('Failed to write approval response', error);
+    }
+  }
+
   private isMcpInfoCommand(text: string): boolean {
     return /^(mcp|servers?)(\s+(info|list|status))?(\?)?$/i.test(text.trim());
   }
@@ -754,9 +829,10 @@ export class SlackHandler {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval granted', { approvalId });
-      
-      permissionServer.resolveApproval(approvalId, true);
-      
+
+      // Write approval to file for MCP server to read
+      this.writeApprovalResponse(approvalId, true);
+
       await respond({
         response_type: 'ephemeral',
         text: '✅ Tool execution approved'
@@ -768,19 +844,21 @@ export class SlackHandler {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval denied', { approvalId });
-      
-      permissionServer.resolveApproval(approvalId, false);
-      
+
+      // Write denial to file for MCP server to read
+      this.writeApprovalResponse(approvalId, false);
+
       await respond({
         response_type: 'ephemeral',
         text: '❌ Tool execution denied'
       });
     });
 
-    // Cleanup inactive sessions periodically
+    // Cleanup inactive sessions periodically (every hour)
+    // Session timeout is configurable via SESSION_TIMEOUT_HOURS env var (default: 24h, 0 = never)
     setInterval(() => {
       this.logger.debug('Running session cleanup');
-      this.claudeHandler.cleanupInactiveSessions();
-    }, 5 * 60 * 1000); // Every 5 minutes
+      this.claudeHandler.cleanupInactiveSessions(config.sessionTimeoutHours);
+    }, 60 * 60 * 1000); // Every hour
   }
 }
