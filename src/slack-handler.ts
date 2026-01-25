@@ -220,9 +220,21 @@ export class SlackHandler {
           const sessionId = this.claudeHandler.getSessionId(user, channel, thread_ts || ts);
           const pid = process.pid;
           const hostname = require('os').hostname();
+          const isDMForSession = channel.startsWith('D');
+          const workingDir = this.workingDirManager.getWorkingDirectory(
+            channel,
+            thread_ts,
+            isDMForSession ? user : undefined
+          );
           if (sessionId) {
+            let resumeCommand = '';
+            if (workingDir) {
+              resumeCommand = `cd ${workingDir} && claude --resume ${sessionId}`;
+            } else {
+              resumeCommand = `claude --resume ${sessionId}`;
+            }
             await say({
-              text: `📋 *Session Info*\n• Session ID: \`${sessionId}\`\n• PID: \`${pid}\`\n• Host: \`${hostname}\`\n\nTo continue this session on your PC:\n\`\`\`\nclaude --resume ${sessionId}\n\`\`\``,
+              text: `📋 *Session Info*\n• Session ID: \`${sessionId}\`\n• Working Dir: \`${workingDir || 'not set'}\`\n• PID: \`${pid}\`\n• Host: \`${hostname}\`\n\nTo continue this session on your PC:\n\`\`\`\n${resumeCommand}\n\`\`\``,
               thread_ts: thread_ts || ts,
             });
           } else {
