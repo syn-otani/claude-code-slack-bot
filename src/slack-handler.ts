@@ -110,8 +110,10 @@ export class SlackHandler {
 
       if (result.success) {
         const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
+        const pid = process.pid;
+        const hostname = require('os').hostname();
         await say({
-          text: `✅ Working directory set for ${context}: \`${result.resolvedPath}\``,
+          text: `✅ Working directory set for ${context}: \`${result.resolvedPath}\`\n📍 *Process:* PID \`${pid}\` on \`${hostname}\``,
           thread_ts: thread_ts || ts,
         });
       } else {
@@ -132,9 +134,17 @@ export class SlackHandler {
         isDM ? user : undefined
       );
       const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-      
+      const pid = process.pid;
+      const hostname = require('os').hostname();
+      const sessionId = this.claudeHandler.getSessionId(user, channel, thread_ts || ts);
+
+      let message = `${this.workingDirManager.formatDirectoryMessage(directory, context)}\n📍 *Process:* PID \`${pid}\` on \`${hostname}\``;
+      if (sessionId) {
+        message += `\n🔗 *Session:* \`${sessionId}\``;
+      }
+
       await say({
-        text: this.workingDirManager.formatDirectoryMessage(directory, context),
+        text: message,
         thread_ts: thread_ts || ts,
       });
       return;
@@ -190,6 +200,39 @@ export class SlackHandler {
           thread_ts: thread_ts || ts,
         });
         return;
+      }
+    }
+
+    // Check if this is a session command (only if there's text)
+    if (text) {
+      const sessionCommand = this.parseSessionCommand(text);
+      if (sessionCommand) {
+        if (sessionCommand.action === 'attach') {
+          // Attach external session ID
+          this.claudeHandler.attachExternalSession(user, channel, thread_ts, sessionCommand.sessionId!);
+          await say({
+            text: `🔗 *Session attached!*\nExternal session \`${sessionCommand.sessionId}\` is now linked to this conversation.\n\nYou can continue the conversation from where you left off on your PC.`,
+            thread_ts: thread_ts || ts,
+          });
+          return;
+        } else if (sessionCommand.action === 'info') {
+          // Show current session info
+          const sessionId = this.claudeHandler.getSessionId(user, channel, thread_ts || ts);
+          const pid = process.pid;
+          const hostname = require('os').hostname();
+          if (sessionId) {
+            await say({
+              text: `📋 *Session Info*\n• Session ID: \`${sessionId}\`\n• PID: \`${pid}\`\n• Host: \`${hostname}\`\n\nTo continue this session on your PC:\n\`\`\`\nclaude --resume ${sessionId}\n\`\`\``,
+              thread_ts: thread_ts || ts,
+            });
+          } else {
+            await say({
+              text: `📋 *Session Info*\n• No active session yet\n• PID: \`${pid}\`\n• Host: \`${hostname}\`\n\nSend a message to start a new session, or use \`session <id>\` to attach an existing one.`,
+              thread_ts: thread_ts || ts,
+            });
+          }
+          return;
+        }
       }
     }
 
@@ -724,6 +767,23 @@ export class SlackHandler {
 
   private isMcpReloadCommand(text: string): boolean {
     return /^(mcp|servers?)\s+(reload|refresh)$/i.test(text.trim());
+  }
+
+  private parseSessionCommand(text: string): { action: 'attach' | 'info'; sessionId?: string } | null {
+    const trimmed = text.trim();
+
+    // Match "session <id>" to attach external session
+    const attachMatch = trimmed.match(/^session\s+([a-f0-9-]+)$/i);
+    if (attachMatch) {
+      return { action: 'attach', sessionId: attachMatch[1] };
+    }
+
+    // Match "session" or "session?" to show session info
+    if (/^session(\s+info)?(\?)?$/i.test(trimmed)) {
+      return { action: 'info' };
+    }
+
+    return null;
   }
 
   private async getBotUserId(): Promise<string> {

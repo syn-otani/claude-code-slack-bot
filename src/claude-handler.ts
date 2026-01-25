@@ -177,4 +177,40 @@ export class ClaudeHandler {
   setSession(key: string, session: ConversationSession): void {
     this.sessions.set(key, session);
   }
+
+  /**
+   * Attach an external session ID (from PC Claude Code) to a Slack session
+   */
+  attachExternalSession(userId: string, channelId: string, threadTs: string | undefined, externalSessionId: string): ConversationSession {
+    const key = this.getSessionKey(userId, channelId, threadTs);
+
+    // Create or update session with the external sessionId
+    const session: ConversationSession = {
+      userId,
+      channelId,
+      threadTs,
+      sessionId: externalSessionId,
+      isActive: true,
+      lastActivity: new Date(),
+    };
+
+    this.sessions.set(key, session);
+    this.logger.info('Attached external session', {
+      key,
+      externalSessionId,
+      userId,
+      channelId,
+      threadTs
+    });
+
+    return session;
+  }
+
+  /**
+   * Get session ID for a given context
+   */
+  getSessionId(userId: string, channelId: string, threadTs?: string): string | undefined {
+    const session = this.getSession(userId, channelId, threadTs);
+    return session?.sessionId;
+  }
 }
