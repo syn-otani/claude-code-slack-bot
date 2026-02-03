@@ -1,15 +1,19 @@
 import { Logger } from './logger';
 
+export type PermissionMode = 'approval' | 'bypass' | 'auto';
+
 /**
- * Manages bypass mode settings for permission approval.
- * When bypass mode is enabled, tools are executed without requiring user approval.
+ * Manages permission mode settings.
+ * - approval: All tool executions require user approval
+ * - bypass: All tool executions are allowed without approval
+ * - auto: Tool executions are allowed without approval, except dangerous operations
  */
 export class BypassModeManager {
-  private bypassModes: Map<string, boolean> = new Map();
+  private modes: Map<string, PermissionMode> = new Map();
   private logger = new Logger('BypassModeManager');
 
   /**
-   * Get the key for storing bypass mode state.
+   * Get the key for storing mode state.
    * Uses the same key format as working directory manager.
    */
   private getKey(channelId: string, threadTs?: string, userId?: string): string {
@@ -23,96 +27,137 @@ export class BypassModeManager {
   }
 
   /**
-   * Set bypass mode for a channel/thread
+   * Set permission mode for a channel/thread
    */
-  setBypassMode(channelId: string, enabled: boolean, threadTs?: string, userId?: string): void {
+  setMode(channelId: string, mode: PermissionMode, threadTs?: string, userId?: string): void {
     const key = this.getKey(channelId, threadTs, userId);
-    this.bypassModes.set(key, enabled);
-    this.logger.info('Bypass mode changed', { key, enabled });
+    this.modes.set(key, mode);
+    this.logger.info('Permission mode changed', { key, mode });
   }
 
   /**
-   * Get bypass mode for a channel/thread
-   * Returns bypass status with priority: Thread > Channel/DM
+   * Get permission mode for a channel/thread
+   * Returns mode with priority: Thread > Channel/DM
+   * Default: 'approval'
    */
-  isBypassMode(channelId: string, threadTs?: string, userId?: string): boolean {
+  getMode(channelId: string, threadTs?: string, userId?: string): PermissionMode {
     // Check thread-specific setting first
     if (threadTs) {
       const threadKey = this.getKey(channelId, threadTs);
-      const threadBypass = this.bypassModes.get(threadKey);
-      if (threadBypass !== undefined) {
-        return threadBypass;
+      const threadMode = this.modes.get(threadKey);
+      if (threadMode !== undefined) {
+        return threadMode;
       }
     }
 
     // Fall back to channel/DM setting
     const channelKey = this.getKey(channelId, undefined, userId);
-    return this.bypassModes.get(channelKey) ?? false;
+    return this.modes.get(channelKey) ?? 'approval';
+  }
+
+  // Legacy compatibility methods
+  setBypassMode(channelId: string, enabled: boolean, threadTs?: string, userId?: string): void {
+    this.setMode(channelId, enabled ? 'bypass' : 'approval', threadTs, userId);
+  }
+
+  isBypassMode(channelId: string, threadTs?: string, userId?: string): boolean {
+    return this.getMode(channelId, threadTs, userId) === 'bypass';
+  }
+
+  isAutoMode(channelId: string, threadTs?: string, userId?: string): boolean {
+    return this.getMode(channelId, threadTs, userId) === 'auto';
+  }
+
+  isApprovalMode(channelId: string, threadTs?: string, userId?: string): boolean {
+    return this.getMode(channelId, threadTs, userId) === 'approval';
   }
 
   /**
-   * Parse bypass command from text
-   * Returns { command: 'on' | 'off' | null } or null if not a bypass command
+   * Parse mode command from text
+   * Returns mode or null if not a mode command
    */
-  parseBypassCommand(text: string): { enable: boolean } | null {
+  parseModeCommand(text: string): { mode: PermissionMode } | null {
     const trimmed = text.trim().toLowerCase();
 
-    // Match patterns like: "bypass on", "bypass off", "bypass enable", "bypass disable"
-    // Also: "approval on", "approval off" (inverted logic)
-    const bypassOnMatch = /^bypass\s+(on|enable|enabled|true|1)$/i.test(trimmed);
-    const bypassOffMatch = /^bypass\s+(off|disable|disabled|false|0)$/i.test(trimmed);
-    const approvalOnMatch = /^approval\s+(on|enable|enabled|true|1)$/i.test(trimmed);
-    const approvalOffMatch = /^approval\s+(off|disable|disabled|false|0)$/i.test(trimmed);
-
-    if (bypassOnMatch || approvalOffMatch) {
-      return { enable: true };
+    // Auto mode
+    if (/^auto\s+(on|enable|enabled|true|1)$/i.test(trimmed)) {
+      return { mode: 'auto' };
     }
-    if (bypassOffMatch || approvalOnMatch) {
-      return { enable: false };
+    if (/^auto\s+(off|disable|disabled|false|0)$/i.test(trimmed)) {
+      return { mode: 'approval' };
     }
 
-    // Check for status query
-    if (/^bypass(\s+status)?(\?)?$/i.test(trimmed) || /^approval(\s+status)?(\?)?$/i.test(trimmed)) {
-      return null; // Return null to indicate this is a status query, not a command
+    // Bypass mode (legacy)
+    if (/^bypass\s+(on|enable|enabled|true|1)$/i.test(trimmed)) {
+      return { mode: 'bypass' };
+    }
+    if (/^bypass\s+(off|disable|disabled|false|0)$/i.test(trimmed)) {
+      return { mode: 'approval' };
+    }
+
+    // Approval mode
+    if (/^approval\s+(on|enable|enabled|true|1)$/i.test(trimmed)) {
+      return { mode: 'approval' };
+    }
+    if (/^approval\s+(off|disable|disabled|false|0)$/i.test(trimmed)) {
+      return { mode: 'bypass' };
     }
 
     return null;
   }
 
+  // Legacy method for compatibility
+  parseBypassCommand(text: string): { enable: boolean } | null {
+    const result = this.parseModeCommand(text);
+    if (result) {
+      return { enable: result.mode === 'bypass' };
+    }
+    return null;
+  }
+
   /**
-   * Check if text is a bypass status query
+   * Check if text is a mode status query
    */
   isStatusQuery(text: string): boolean {
     const trimmed = text.trim().toLowerCase();
-    return /^bypass(\s+status)?(\?)?$/i.test(trimmed) || /^approval(\s+status)?(\?)?$/i.test(trimmed);
+    return /^(mode|bypass|approval|auto)(\s+status)?(\?)?$/i.test(trimmed);
   }
 
   /**
    * Format status message
    */
-  formatStatusMessage(enabled: boolean, context: string): string {
-    if (enabled) {
-      return `🔓 *Bypass mode is ON* for ${context}\n\nTools will be executed without requiring approval.\nUse \`bypass off\` or \`approval on\` to enable approval mode.`;
-    } else {
-      return `🔐 *Approval mode is ON* for ${context}\n\nYou will be asked to approve tool executions.\nUse \`bypass on\` or \`approval off\` to skip approvals.`;
+  formatStatusMessage(mode: PermissionMode, context: string): string {
+    switch (mode) {
+      case 'bypass':
+        return `🔓 *Bypass mode* for ${context}\n\nAll tools executed without approval.\nUse \`approval on\` or \`auto on\` to change.`;
+      case 'auto':
+        return `🤖 *Auto mode* for ${context}\n\nTools executed automatically, dangerous operations blocked.\nUse \`approval on\` or \`bypass on\` to change.`;
+      case 'approval':
+      default:
+        return `🔐 *Approval mode* for ${context}\n\nAll tool executions require approval.\nUse \`auto on\` or \`bypass on\` to change.`;
     }
   }
 
   /**
-   * Get all bypass mode settings (for backup)
+   * Get all mode settings (for backup)
    */
-  getAllSettings(): Map<string, boolean> {
-    return new Map(this.bypassModes);
+  getAllSettings(): Map<string, PermissionMode> {
+    return new Map(this.modes);
   }
 
   /**
-   * Restore bypass mode settings from backup
+   * Restore mode settings from backup
    */
-  restoreSettings(settings: Map<string, boolean>): void {
-    for (const [key, enabled] of settings.entries()) {
-      this.bypassModes.set(key, enabled);
+  restoreSettings(settings: Map<string, PermissionMode | boolean>): void {
+    for (const [key, value] of settings.entries()) {
+      // Handle legacy boolean format
+      if (typeof value === 'boolean') {
+        this.modes.set(key, value ? 'bypass' : 'approval');
+      } else {
+        this.modes.set(key, value);
+      }
     }
-    this.logger.info(`Restored ${settings.size} bypass mode settings`);
+    this.logger.info(`Restored ${settings.size} mode settings`);
   }
 }
 

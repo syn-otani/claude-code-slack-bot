@@ -20,6 +20,104 @@ interface SlackContext {
   user: string;
 }
 
+// Dangerous patterns that should be blocked in auto mode
+const DANGEROUS_BASH_PATTERNS = [
+  // File deletion - recursive/force with dangerous targets
+  /rm\s+(-[rRf]+\s+)*[^\s]*(\*|\/\s*$|~|\.\.)/,  // rm -rf *, rm /, rm ~, rm ..
+  /rm\s+-[rRf]*\s+\//,  // rm -rf /anything
+
+  // Git destructive operations
+  /git\s+push\s+.*--force/,
+  /git\s+push\s+-f/,
+  /git\s+reset\s+--hard/,
+  /git\s+clean\s+-[fdx]/,
+  /git\s+checkout\s+\.\s*$/,
+  /git\s+restore\s+\.\s*$/,
+
+  // Permission/ownership changes
+  /sudo\s+/,
+  /chmod\s+(-R\s+)?777/,
+  /chown\s+-R/,
+
+  // Remote code execution
+  /curl\s+[^|]*\|\s*(sh|bash|zsh)/,
+  /wget\s+[^|]*\|\s*(sh|bash|zsh)/,
+
+  // Environment variable exposure
+  /^\s*env\s*$/,
+  /^\s*printenv\s*$/,
+  /cat\s+[^\s]*\.env/,
+
+  // Process/service manipulation
+  /kill\s+-9\s+/,
+  /pkill\s+/,
+  /killall\s+/,
+  /launchctl\s+(unload|remove|bootout)/,
+
+  // Package publishing
+  /npm\s+publish/,
+  /yarn\s+publish/,
+
+  // Disk operations
+  /mkfs\./,
+  /dd\s+if=/,
+  /fdisk/,
+];
+
+/**
+ * Check if a bash command matches any dangerous pattern
+ */
+function isDangerousBashCommand(command: string): { dangerous: boolean; reason?: string } {
+  for (const pattern of DANGEROUS_BASH_PATTERNS) {
+    if (pattern.test(command)) {
+      return {
+        dangerous: true,
+        reason: `Command matches dangerous pattern: ${pattern.toString()}`
+      };
+    }
+  }
+  return { dangerous: false };
+}
+
+/**
+ * Check if a file path is within the working directory
+ */
+function isWithinWorkingDirectory(filePath: string, workingDirectory: string): boolean {
+  const resolvedPath = path.resolve(workingDirectory, filePath);
+  const resolvedWorkingDir = path.resolve(workingDirectory);
+  return resolvedPath.startsWith(resolvedWorkingDir + path.sep) || resolvedPath === resolvedWorkingDir;
+}
+
+/**
+ * Check if tool operation is dangerous in auto mode
+ */
+export function checkAutoModeSafety(
+  toolName: string,
+  input: Record<string, unknown>,
+  workingDirectory?: string
+): { safe: boolean; reason?: string } {
+  // Bash command check
+  if (toolName === 'Bash' && typeof input.command === 'string') {
+    const result = isDangerousBashCommand(input.command);
+    if (result.dangerous) {
+      return { safe: false, reason: result.reason };
+    }
+  }
+
+  // File operation outside working directory check
+  if (workingDirectory && (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit')) {
+    const filePath = input.file_path as string;
+    if (filePath && !isWithinWorkingDirectory(filePath, workingDirectory)) {
+      return {
+        safe: false,
+        reason: `File path "${filePath}" is outside working directory "${workingDirectory}"`
+      };
+    }
+  }
+
+  return { safe: true };
+}
+
 // Ensure approval directory exists
 function ensureApprovalDir() {
   if (!fs.existsSync(APPROVAL_DIR)) {
@@ -166,7 +264,6 @@ export class PermissionHandler {
 
     return new Promise((resolve) => {
       const startTime = Date.now();
-      const timeout = 5 * 60 * 1000; // 5 minutes
       const pollInterval = 500; // Check every 500ms
       let pollCount = 0;
       let timeoutId: NodeJS.Timeout;
@@ -195,19 +292,6 @@ export class PermissionHandler {
         if (resolved || signal.aborted) return;
 
         pollCount++;
-
-        // Check if timed out
-        if (Date.now() - startTime > timeout) {
-          cleanup();
-          signal.removeEventListener('abort', abortHandler);
-          logger.info('Permission request timed out', { approvalId, pollCount });
-          try { fs.unlinkSync(approvalFile); } catch {}
-          resolve({
-            behavior: 'deny',
-            message: 'Permission request timed out'
-          });
-          return;
-        }
 
         // Check if approval file exists
         if (fs.existsSync(approvalFile)) {
@@ -241,6 +325,50 @@ export class PermissionHandler {
       // Start polling
       checkApproval();
     });
+  }
+
+  /**
+   * Creates a canUseTool callback for auto mode (allow unless dangerous)
+   */
+  createAutoModeCallback(slackContext: SlackContext, workingDirectory?: string) {
+    return async (
+      toolName: string,
+      input: Record<string, unknown>,
+      options: { signal: AbortSignal; suggestions?: any[] }
+    ): Promise<PermissionResult> => {
+      // Check if operation is safe
+      const safetyCheck = checkAutoModeSafety(toolName, input, workingDirectory);
+
+      if (safetyCheck.safe) {
+        logger.info('Auto mode: allowing tool', { toolName });
+        return {
+          behavior: 'allow',
+          updatedInput: input
+        };
+      }
+
+      // Dangerous operation detected - notify and deny
+      logger.warn('Auto mode: blocking dangerous operation', {
+        toolName,
+        reason: safetyCheck.reason
+      });
+
+      // Notify user in Slack
+      try {
+        await this.slack.chat.postMessage({
+          channel: slackContext.channel,
+          thread_ts: slackContext.threadTs,
+          text: `⛔ *Dangerous operation blocked*\n\nTool: \`${toolName}\`\nReason: ${safetyCheck.reason}\n\n*Input:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\`\n\nSwitch to \`bypass on\` if you want to allow all operations.`
+        });
+      } catch (error) {
+        logger.error('Failed to send block notification', error);
+      }
+
+      return {
+        behavior: 'deny',
+        message: safetyCheck.reason || 'Operation blocked by auto mode'
+      };
+    };
   }
 }
 

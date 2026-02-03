@@ -45,31 +45,40 @@ export class ClaudeHandler {
     workingDirectory?: string,
     slackContext?: { channel: string; threadTs?: string; user: string }
   ): AsyncGenerator<SDKMessage, void, unknown> {
-    // Check if bypass mode is enabled for this channel/thread
-    const isBypassMode = slackContext
-      ? bypassModeManager.isBypassMode(
+    // Get permission mode for this channel/thread
+    const permissionMode = slackContext
+      ? bypassModeManager.getMode(
           slackContext.channel,
           slackContext.threadTs,
           slackContext.channel.startsWith('D') ? slackContext.user : undefined
         )
-      : true; // No Slack context means bypass by default
+      : 'bypass'; // No Slack context means bypass by default
 
     const options: any = {
       outputFormat: 'stream-json',
-      // Use 'bypassPermissions' if bypass mode is on, otherwise 'default' with approval
-      permissionMode: isBypassMode ? 'bypassPermissions' : 'default',
+      // Use 'bypassPermissions' if bypass or auto mode is on, otherwise 'default' with approval
+      permissionMode: permissionMode === 'approval' ? 'default' : 'bypassPermissions',
     };
 
-    // Add canUseTool callback for Slack-based permission approval (only if not in bypass mode)
-    if (slackContext && !isBypassMode) {
-      options.canUseTool = permissionHandler.createCanUseToolCallback(slackContext);
-      this.logger.debug('Added canUseTool callback for Slack permission approval', slackContext);
+    // Add canUseTool callback based on permission mode
+    if (slackContext) {
+      if (permissionMode === 'approval') {
+        // Approval mode: use Slack-based permission approval
+        options.canUseTool = permissionHandler.createCanUseToolCallback(slackContext);
+        this.logger.debug('Added canUseTool callback for Slack permission approval', slackContext);
+      } else if (permissionMode === 'auto') {
+        // Auto mode: allow all except dangerous operations
+        options.canUseTool = permissionHandler.createAutoModeCallback(slackContext, workingDirectory);
+        this.logger.debug('Added canUseTool callback for auto mode', { slackContext, workingDirectory });
+      }
+      // Bypass mode: no callback needed, all tools are allowed
     }
 
     this.logger.debug('Permission mode determined', {
-      isBypassMode,
-      permissionMode: options.permissionMode,
-      hasSlackContext: !!slackContext
+      permissionMode,
+      sdkPermissionMode: options.permissionMode,
+      hasSlackContext: !!slackContext,
+      hasCanUseTool: !!options.canUseTool
     });
 
     if (workingDirectory) {

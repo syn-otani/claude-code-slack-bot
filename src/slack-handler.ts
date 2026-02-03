@@ -176,27 +176,49 @@ export class SlackHandler {
       return;
     }
 
-    // Check if this is a bypass mode command (only if there's text)
+    // Check if this is a permission mode command (only if there's text)
     if (text) {
-      const bypassCommand = bypassModeManager.parseBypassCommand(text);
-      const isDMForBypass = channel.startsWith('D');
-      const context = thread_ts ? 'this thread' : (isDMForBypass ? 'this conversation' : 'this channel');
+      const modeCommand = bypassModeManager.parseModeCommand(text);
+      const isDMForMode = channel.startsWith('D');
+      const context = thread_ts ? 'this thread' : (isDMForMode ? 'this conversation' : 'this channel');
 
-      if (bypassCommand !== null) {
-        bypassModeManager.setBypassMode(channel, bypassCommand.enable, thread_ts, isDMForBypass ? user : undefined);
-        const statusEmoji = bypassCommand.enable ? '🔓' : '🔐';
-        const statusText = bypassCommand.enable ? 'Bypass mode enabled' : 'Approval mode enabled';
+      if (modeCommand !== null) {
+        bypassModeManager.setMode(channel, modeCommand.mode, thread_ts, isDMForMode ? user : undefined);
+
+        let statusEmoji: string;
+        let statusText: string;
+        let description: string;
+
+        switch (modeCommand.mode) {
+          case 'bypass':
+            statusEmoji = '🔓';
+            statusText = 'Bypass mode enabled';
+            description = 'All tools will be executed without requiring approval.';
+            break;
+          case 'auto':
+            statusEmoji = '🤖';
+            statusText = 'Auto mode enabled';
+            description = 'Tools will be executed automatically. Only dangerous operations (rm -rf, git push --force, etc.) will be blocked.';
+            break;
+          case 'approval':
+          default:
+            statusEmoji = '🔐';
+            statusText = 'Approval mode enabled';
+            description = 'You will be asked to approve tool executions.';
+            break;
+        }
+
         await say({
-          text: `${statusEmoji} *${statusText}* for ${context}\n\n${bypassCommand.enable ? 'Tools will be executed without requiring approval.' : 'You will be asked to approve tool executions.'}`,
+          text: `${statusEmoji} *${statusText}* for ${context}\n\n${description}`,
           thread_ts: thread_ts || ts,
         });
         return;
       }
 
       if (bypassModeManager.isStatusQuery(text)) {
-        const isEnabled = bypassModeManager.isBypassMode(channel, thread_ts, isDMForBypass ? user : undefined);
+        const currentMode = bypassModeManager.getMode(channel, thread_ts, isDMForMode ? user : undefined);
         await say({
-          text: bypassModeManager.formatStatusMessage(isEnabled, context),
+          text: bypassModeManager.formatStatusMessage(currentMode, context),
           thread_ts: thread_ts || ts,
         });
         return;
