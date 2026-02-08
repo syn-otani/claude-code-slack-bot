@@ -121,6 +121,11 @@ or
 get directory
 ```
 
+When you set or check the working directory, the bot will display:
+- Directory path
+- Process ID (PID)
+- Hostname
+
 ### Working Directory Scope
 
 - **Direct Messages**: Working directory is set for the entire conversation
@@ -138,6 +143,68 @@ BASE_DIRECTORY=/Users/username/Code/
 With this set, you can use:
 - `cwd herd-website` → resolves to `/Users/username/Code/herd-website`
 - `cwd /absolute/path` → uses absolute path directly
+
+### Permission Modes
+
+The bot supports 3 permission modes for tool execution:
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| 🔐 **approval** | `approval on` | All tool executions require user approval (default) |
+| 🔓 **bypass** | `bypass on` | All tools execute without approval |
+| 🤖 **auto** | `auto on` | Tools execute automatically, only dangerous operations are blocked |
+
+#### Check current mode:
+```
+mode
+```
+
+#### Auto Mode Safety
+
+In auto mode, the following dangerous operations are automatically blocked:
+- **File deletion**: `rm -rf *`, `rm -rf /`, `rm ~`, etc.
+- **Git destructive operations**: `git push --force`, `git reset --hard`, `git clean -fd`
+- **Permission changes**: `sudo`, `chmod 777`, `chown -R`
+- **Remote code execution**: `curl ... | sh`, `wget ... | bash`
+- **Environment variable exposure**: `env`, `printenv`, `cat .env`
+- **Process operations**: `kill -9`, `pkill`, `killall`
+- **Package publishing**: `npm publish`, `yarn publish`
+- **Writing outside working directory**
+
+### Session Management
+
+Share sessions between your PC terminal and Slack.
+
+#### View session info:
+```
+session
+```
+
+This displays:
+- Session ID
+- Working directory
+- Process ID
+- Hostname
+- Resume command for your PC
+
+#### Attach external session:
+```
+session <session-id>
+```
+
+#### Share session between PC and Slack:
+
+**From Slack to PC:**
+1. Run `session` in Slack
+2. Copy the displayed resume command
+3. Run it in your PC terminal: `cd /path/to/project && claude --resume <session-id>`
+
+**From PC to Slack:**
+1. Start `claude` in your terminal
+2. Copy the session ID from `~/.claude/projects/<project-dir>/`
+3. In Slack: `session <session-id>`
+
+**Note**: Sessions are stored per working directory. You must run `claude --resume` from the same directory where the session was created.
 
 ### Direct Messages
 Simply send a direct message to the bot with your request:
@@ -199,7 +266,7 @@ The bot supports MCP servers to extend Claude's capabilities with additional too
          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/files"]
        },
        "github": {
-         "command": "npx", 
+         "command": "npx",
          "args": ["-y", "@modelcontextprotocol/server-github"],
          "env": {
            "GITHUB_TOKEN": "your-token"
@@ -222,6 +289,21 @@ The bot supports MCP servers to extend Claude's capabilities with additional too
 - **Web Search**: Search capabilities (custom servers)
 
 All MCP tools are automatically allowed and follow the pattern: `mcp__serverName__toolName`
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `cwd /path` | Set working directory |
+| `cwd` | Show current working directory |
+| `approval on` | Enable approval mode (default) |
+| `bypass on` | Enable bypass mode |
+| `auto on` | Enable auto mode |
+| `mode` | Show current permission mode |
+| `session` | Show session info |
+| `session <id>` | Attach external session |
+| `mcp` | Show MCP servers |
+| `mcp reload` | Reload MCP configuration |
 
 ## Advanced Configuration
 
