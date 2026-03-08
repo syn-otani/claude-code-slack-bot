@@ -19,6 +19,8 @@ export const config = {
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
   // Session timeout in hours (default: 24 hours, 0 = never timeout)
   sessionTimeoutHours: parseInt(process.env.SESSION_TIMEOUT_HOURS || '24', 10),
+  // JCARVIS HQ channel for centralized permission requests
+  hqChannelId: process.env.HQ_CHANNEL_ID || '',
 };
 
 export function validateConfig() {
