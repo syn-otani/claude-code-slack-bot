@@ -4,6 +4,7 @@ import { Logger } from './logger';
 import { McpManager, McpServerConfig } from './mcp-manager';
 import { permissionHandler } from './permission-handler';
 import { bypassModeManager } from './bypass-mode-manager';
+import { config } from './config';
 import path from 'path';
 
 // Get the directory where this file is located
@@ -58,6 +59,7 @@ export class ClaudeHandler {
       outputFormat: 'stream-json',
       // Use 'bypassPermissions' if bypass or auto mode is on, otherwise 'default' with approval
       permissionMode: permissionMode === 'approval' ? 'default' : 'bypassPermissions',
+      ...(config.claude.defaultModel && { model: config.claude.defaultModel }),
     };
 
     // Add canUseTool callback based on permission mode

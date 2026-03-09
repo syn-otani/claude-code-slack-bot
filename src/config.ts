@@ -14,11 +14,14 @@ export const config = {
   claude: {
     useBedrock: process.env.CLAUDE_CODE_USE_BEDROCK === '1',
     useVertex: process.env.CLAUDE_CODE_USE_VERTEX === '1',
+    defaultModel: process.env.CLAUDE_DEFAULT_MODEL || undefined,
   },
   baseDirectory: process.env.BASE_DIRECTORY || '',
   debug: process.env.DEBUG === 'true' || process.env.NODE_ENV === 'development',
   // Session timeout in hours (default: 24 hours, 0 = never timeout)
   sessionTimeoutHours: parseInt(process.env.SESSION_TIMEOUT_HOURS || '24', 10),
+  // JCARVIS HQ channel for centralized permission requests
+  hqChannelId: process.env.HQ_CHANNEL_ID || '',
 };
 
 export function validateConfig() {

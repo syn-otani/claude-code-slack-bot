@@ -1,5 +1,6 @@
 import { WebClient } from '@slack/web-api';
 import { Logger } from './logger';
+import { config } from './config';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -18,6 +19,7 @@ interface SlackContext {
   channel: string;
   threadTs?: string;
   user: string;
+  projectName?: string;
 }
 
 // Dangerous patterns that should be blocked in auto mode
@@ -146,14 +148,16 @@ export class PermissionHandler {
       // Generate unique approval ID
       const approvalId = `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-      // Send approval request to Slack
+      // Send approval request to Slack (HQ channel if configured, otherwise original channel)
+      const targetChannel = config.hqChannelId || slackContext.channel;
       const mentionText = slackContext.user ? `<@${slackContext.user}> ` : '';
+      const projectLabel = slackContext.projectName ? ` [${slackContext.projectName}]` : '';
       const blocks = [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `${mentionText}🔐 *Permission Request*\n\nClaude wants to use the tool: \`${toolName}\`\n\n*Tool Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``
+            text: `${mentionText}🔐 *Permission Request*${projectLabel}\n\nClaude wants to use the tool: \`${toolName}\`\n\n*Tool Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``
           }
         },
         {
@@ -194,10 +198,10 @@ export class PermissionHandler {
 
       try {
         const result = await this.slack.chat.postMessage({
-          channel: slackContext.channel,
-          thread_ts: slackContext.threadTs,
+          channel: targetChannel,
+          thread_ts: config.hqChannelId ? undefined : slackContext.threadTs,
           blocks,
-          text: `${mentionText}Permission request for ${toolName}`
+          text: `${mentionText}Permission request for ${toolName}${projectLabel}`
         });
 
         // Wait for user response via file polling
@@ -329,6 +333,7 @@ export class PermissionHandler {
 
   /**
    * Creates a canUseTool callback for auto mode (allow unless dangerous)
+   * When HQ channel is configured, dangerous operations show approval buttons instead of auto-deny
    */
   createAutoModeCallback(slackContext: SlackContext, workingDirectory?: string) {
     return async (
@@ -347,13 +352,105 @@ export class PermissionHandler {
         };
       }
 
-      // Dangerous operation detected - notify and deny
-      logger.warn('Auto mode: blocking dangerous operation', {
+      // Dangerous operation detected
+      logger.warn('Auto mode: dangerous operation detected', {
         toolName,
         reason: safetyCheck.reason
       });
 
-      // Notify user in Slack
+      // If HQ channel is configured, show approval buttons instead of auto-deny
+      if (config.hqChannelId) {
+        logger.info('Auto mode: routing dangerous operation to HQ for approval', { toolName });
+
+        const approvalId = `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const mentionText = slackContext.user ? `<@${slackContext.user}> ` : '';
+        const projectLabel = slackContext.projectName ? ` [${slackContext.projectName}]` : '';
+
+        const blocks = [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `${mentionText}⚠️ *Dangerous Operation Detected*${projectLabel}\n\nTool: \`${toolName}\`\nReason: ${safetyCheck.reason}\n\n*Parameters:*\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``
+            }
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "✅ Approve" },
+                style: "primary",
+                action_id: "approve_tool",
+                value: approvalId
+              },
+              {
+                type: "button",
+                text: { type: "plain_text", text: "❌ Deny" },
+                style: "danger",
+                action_id: "deny_tool",
+                value: approvalId
+              }
+            ]
+          },
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: `Auto mode | Tool: ${toolName}${projectLabel}`
+              }
+            ]
+          }
+        ];
+
+        try {
+          const result = await this.slack.chat.postMessage({
+            channel: config.hqChannelId,
+            blocks,
+            text: `${mentionText}Dangerous operation requires approval: ${toolName}${projectLabel}`
+          });
+
+          // Wait for user response
+          const response = await this.waitForApproval(approvalId, options.signal);
+
+          // Update the message
+          if (result.ts) {
+            await this.slack.chat.update({
+              channel: result.channel!,
+              ts: result.ts,
+              blocks: [
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: `⚠️ *Dangerous Operation* - ${response.behavior === 'allow' ? '✅ Approved' : '❌ Denied'}${projectLabel}\n\nTool: \`${toolName}\`\nReason: ${safetyCheck.reason}`
+                  }
+                },
+                {
+                  type: "context",
+                  elements: [
+                    {
+                      type: "mrkdwn",
+                      text: `${response.behavior === 'allow' ? 'Approved' : 'Denied'} by user | Auto mode${projectLabel}`
+                    }
+                  ]
+                }
+              ],
+              text: `Dangerous operation ${response.behavior === 'allow' ? 'approved' : 'denied'}: ${toolName}`
+            });
+          }
+
+          return response.behavior === 'allow'
+            ? { behavior: 'allow', updatedInput: input }
+            : { behavior: 'deny', message: response.message || 'Denied by user' };
+        } catch (error) {
+          logger.error('Error in auto mode HQ approval', error);
+          return { behavior: 'deny', message: 'Error occurred while requesting approval' };
+        }
+      }
+
+      // No HQ channel - original behavior: notify and deny
       try {
         await this.slack.chat.postMessage({
           channel: slackContext.channel,

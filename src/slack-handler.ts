@@ -361,10 +361,13 @@ export class SlackHandler {
       await this.updateMessageReaction(sessionKey, '🤔');
       
       // Create Slack context for permission prompts
+      // Extract project name from working directory for HQ channel labels
+      const projectName = workingDirectory ? path.basename(workingDirectory) : undefined;
       const slackContext = {
         channel,
         threadTs: thread_ts,
-        user
+        user,
+        projectName
       };
       
       for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, slackContext)) {
